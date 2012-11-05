@@ -1,0 +1,15 @@
+f73f0b79e5b5dd16fe0dc0305ca1eebc *DESCRIPTION
+917c86e0ceeebd396b670377864a05e8 *NAMESPACE
+7bfe1e8588590844303c5568c25af078 *R/cli.R
+850e51c443e01c2c378065d9c8239667 *R/conn.R
+a0d9bc9f205fc694b10f962a55384a55 *configure.win
+75644342f4200d49016f9333201b92f6 *man/RCC.Rd
+86e5f13a97da7d3311703559ddffbe0e *man/Rclient.Rd
+ed7bc6eaee8b2524182dcf1647da8a8e *src/Makevars
+31e24ed30aca5770049f49f2826f40ef *src/Makevars.win
+e21054872b566d25bcb288959bc08091 *src/RSprotocol.h
+843115290d739c59c8d3fc3e640af4ad *src/cli.c
+1d164d1a36afddacaaf0fdd1dc1c0856 *src/qap.h
+5e5da33f7f3945e8415c93a16ade619d *src/qap_decode.c
+d1f7e55268b90d13b67e44dce1fb3c85 *src/qap_encode.c
+2b67cfab4cfa47e967cbb6dd5b6ca547 *src/sbthread.h
