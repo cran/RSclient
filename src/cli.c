@@ -26,6 +26,9 @@ static int wsock_up = 0;
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#ifndef AF_LOCAL
+#define AF_LOCAL AF_UNIX
+#endif
 /* until we use confgiure we hard-code TLS use for now */
 #define USE_TLS 1
 /* and we enable IPv6 if we see it */
@@ -411,6 +414,9 @@ static long rsc_slurp(rsconn_t *c, long needed) {
     return len;
 }
 
+/* Rserve protocol */
+#include "RSprotocol.h"
+
 /* --- R API -- */
 
 #define R2UTF8(X) translateCharUTF8(STRING_ELT(X, 0))
@@ -420,8 +426,12 @@ static void rsconn_fin(SEXP what) {
     if (c) rsc_close(c);
 }
 
-SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS) {
-    int port = asInteger(sPort), use_tls = (asInteger(useTLS) == 1);
+/* FIXME: hack for now -- most of this client works only on little-endian machines
+   but there is some feeble effort to fix that -- in the meantime it's just noop */
+#define itop(X) X
+
+SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS, SEXP sProxyTarget, SEXP sProxyWait) {
+    int port = asInteger(sPort), use_tls = (asInteger(useTLS) == 1), px_get_slot = (asInteger(sProxyWait) == 0);
     const char *host;
     char idstr[32];
     rsconn_t *c;
@@ -459,6 +469,32 @@ SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS) {
 	rsc_close(c);
 	Rf_error("Handshake failed - ID string not received");
     }
+    if (!memcmp(idstr, "RSpx", 4) && !memcmp(idstr + 8, "QAP1", 4)) { /* RSpx proxy protocol */
+	const char *proxy_target;
+	struct phdr hdr;
+	if (TYPEOF(sProxyTarget) != STRSXP || LENGTH(sProxyTarget) < 1) {
+	    rsc_close(c);
+	    Rf_error("Connected to a non-transparent proxy, but no proxy target was specified");
+	}
+	/* send CMD_PROXY_TARGET and re-fetch ID string */
+	proxy_target = CHAR(STRING_ELT(sProxyTarget, 0));
+	hdr.cmd = itop(CMD_PROXY_TARGET);
+	hdr.len = itop(strlen(proxy_target) + 1);
+	hdr.dof = 0;
+	hdr.res = 0;
+	rsc_write(c, &hdr, sizeof(hdr));
+	rsc_write(c, proxy_target, strlen(proxy_target) + 1);
+	if (px_get_slot) { /* send CMD_PROXY_GET_SLOT as well if requested */
+	    hdr.cmd = itop(CMD_PROXY_GET_SLOT);
+	    hdr.len = 0;
+	    rsc_write(c, &hdr, sizeof(hdr));
+	}
+	rsc_flush(c);
+	if (rsc_read(c, idstr, 32) != 32) {
+	    rsc_close(c);
+	    Rf_error("Handshake failed - ID string not received (after CMD_PROXY_TARGET)");
+	}
+    }
     if (memcmp(idstr, "Rsrv", 4) || memcmp(idstr + 8, "QAP1", 4)) {
 	rsc_close(c);
 	Rf_error("Handshake failed - unknown protocol");
@@ -489,13 +525,11 @@ SEXP RS_close(SEXP sc) {
     return R_NilValue;
 }
 
-/* Rserve protocol */
-
-#include "RSprotocol.h"
-
 static const char *rs_status_string(int status) {
     switch (status) {
     case 0: return "(status is OK)";
+    case 127:
+    case 1: return "error in R during evaluation";
     case 2: return "R parser: input incomplete";
     case 3: return "R parser: error in the expression";
     case 4: return "R parser: EOF reached";
@@ -510,15 +544,15 @@ static const char *rs_status_string(int status) {
     case ERR_unsupportedCmd: return "unsupported command";
     case ERR_unknownCmd: return "unknown command";
     case ERR_data_overflow: return "data overflow";
-    case ERR_object_too_big: return "object too big";
+    case ERR_object_too_big: return "object is too big";
     case ERR_out_of_mem: return "out of memory";
-    case ERR_ctrl_closed: return "no control line present";
+    case ERR_ctrl_closed: return "no control line present (control commands disabled or server shutdown)";
     case ERR_session_busy: return "session is busy";
     case ERR_detach_failed: return "unable to detach session";
     case ERR_disabled: return "feature is disabled";
     case ERR_unavailable: return "feature is not available in this build of the server";
     case ERR_cryptError: return "crypto-system error";
-    case ERR_securityClose: return "connection aboted for security reasons";
+    case ERR_securityClose: return "connection closed due to security violation";
     }
     return "(unknown error code)";
 }
@@ -689,10 +723,10 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 	}
 	break;
     }
-    c->in_cmd = 0;
+    if (c->in_cmd) c->in_cmd--;
     if (hdr->cmd != RESP_OK) {
 	rsc_slurp(c, tl);
-	Rf_error("command failed with status code %d: %s", CMD_STAT(hdr->cmd), rs_status_string(CMD_STAT(hdr->cmd)));
+	Rf_error("command failed with status code 0x%x: %s", CMD_STAT(hdr->cmd), rs_status_string(CMD_STAT(hdr->cmd)));
     }
     return tl;
 }
@@ -708,7 +742,7 @@ SEXP RS_eval(SEXP sc, SEXP what, SEXP sWait) {
     if (!inherits(sc, "RserveConnection")) Rf_error("invalid connection");
     c = (rsconn_t*) EXTPTR_PTR(sc);
     if (!c) Rf_error("invalid NULL connection");
-    if (c->in_cmd) Rf_error("uncollected result from previous command, remove first");
+    if (!async && c->in_cmd) Rf_error("uncollected result from previous command, remove first");
     hdr.cmd = CMD_serEval;
     hdr.len = pl;
     hdr.dof = 0;
@@ -717,7 +751,7 @@ SEXP RS_eval(SEXP sc, SEXP what, SEXP sWait) {
     rsc_write(c, p, pl);
     rsc_flush(c);
     if (async) {
-	c->in_cmd = CMD_serEval;
+	c->in_cmd++;
 	return R_NilValue;
     }
     tl = get_hdr(sc, c, &hdr);
@@ -741,7 +775,7 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
 	    SEXP cc = VECTOR_ELT(sc, i);
 	    if (TYPEOF(cc) == EXTPTRSXP && inherits(cc, "RserveConnection")) {
 		rsconn_t *c = (rsconn_t*) EXTPTR_PTR(cc);
-		if (c && (c->in_cmd == CMD_serEval || c->in_cmd == CMD_serEEval) && c->s != -1) {
+		if (c && (c->in_cmd) && c->s != -1) {
 		    if (c->s > maxfd) maxfd = c->s;
 		    FD_SET(c->s, &rset);
 		}
@@ -749,7 +783,7 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
 	}
     } else if (TYPEOF(sc) == EXTPTRSXP && inherits(sc, "RserveConnection")) {
 	rsconn_t *c = (rsconn_t*) EXTPTR_PTR(sc);
-	if (c && (c->in_cmd == CMD_serEval || c->in_cmd == CMD_serEEval) && c->s != -1) {
+	if (c && (c->in_cmd) && c->s != -1) {
 	    if (c->s > maxfd) maxfd = c->s;
 	    FD_SET(c->s, &rset);
 	}
@@ -765,6 +799,7 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
 	struct phdr hdr;
 	long tl;
 	rsconn_t *c;
+	int rdy = -1;
 	if (TYPEOF(sc) == EXTPTRSXP) /* there is only one so it must be us */
 	    c = (rsconn_t*) EXTPTR_PTR(sc);
 	else { /* find a connection that is ready */
@@ -773,17 +808,19 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
 		SEXP cc = VECTOR_ELT(sc, i);
 		if (TYPEOF(cc) == EXTPTRSXP && inherits(cc, "RserveConnection")) {
 		    c = (rsconn_t*) EXTPTR_PTR(cc);
-		    if (c && (c->in_cmd == CMD_serEval || c->in_cmd == CMD_serEEval) && FD_ISSET(c->s, &rset))
+		    if (c && (c->in_cmd) && FD_ISSET(c->s, &rset))
 			break;
 		}
 	    }	    
 	    if (i >= n) return R_NilValue;
-	    sc = VECTOR_ELT(sc, i);
+	    rdy = i;
+	    sc = VECTOR_ELT(sc, rdy);
 	}
 	/* both sc and c are set to the node and the structure */
 	tl = get_hdr(sc, c, &hdr);
 	res = PROTECT(allocVector(RAWSXP, tl));
 	setAttrib(res, install("rsc"), sc);
+	if (rdy >= 0) setAttrib(res, install("index"), ScalarInteger(rdy + 1));
 	if (rsc_read(c, RAW(res), tl) != tl) {
 	    RS_close(sc);
 	    Rf_error("read error reading payload of the eval result");
@@ -793,18 +830,18 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
     }
 }
 
-SEXP RS_assign(SEXP sc, SEXP what) {
+SEXP RS_assign(SEXP sc, SEXP what, SEXP sWait) {
     SEXP res;
     rsconn_t *c;
     struct phdr hdr;
     char *p = (char*) RAW(what);
-    int pl = LENGTH(what);
+    int pl = LENGTH(what), async = (asInteger(sWait) == 0);
     long tl;
 
     if (!inherits(sc, "RserveConnection")) Rf_error("invalid connection");
     c = (rsconn_t*) EXTPTR_PTR(sc);
     if (!c) Rf_error("invalid NULL connection");
-    if (c->in_cmd) Rf_error("uncollected result from previous command, remove first");
+    if (!async && c->in_cmd) Rf_error("uncollected result from previous command, remove first");
     hdr.cmd = CMD_serAssign;
     hdr.len = pl;
     hdr.dof = 0;
@@ -812,6 +849,10 @@ SEXP RS_assign(SEXP sc, SEXP what) {
     rsc_write(c, &hdr, sizeof(hdr));
     rsc_write(c, p, pl);
     rsc_flush(c);
+    if (async) {
+	c->in_cmd++;
+	return R_NilValue;
+    }
     tl = get_hdr(sc, c, &hdr);
     res = allocVector(RAWSXP, tl);
     if (rsc_read(c, RAW(res), tl) != tl) {
@@ -819,6 +860,51 @@ SEXP RS_assign(SEXP sc, SEXP what) {
 	Rf_error("read error reading payload of the eval result");
     }
     return res;
+}
+
+SEXP RS_ctrl_str(SEXP sc, SEXP sCmd, SEXP sPayload) {
+    rsconn_t *c;
+    const char *pl;
+    struct phdr hdr;
+    int cmd = asInteger(sCmd), pll, par;
+    long tl;
+
+    if (!inherits(sc, "RserveConnection")) Rf_error("invalid connection");
+    c = (rsconn_t*) EXTPTR_PTR(sc);
+    if (!c) Rf_error("invalid NULL connection");
+    if (c->in_cmd) Rf_error("uncollected result from previous command, remove first");
+    if (TYPEOF(sPayload) != STRSXP || LENGTH(sPayload) != 1)
+	Rf_error("invalid control command payload - string expected"); 
+    pl = CHAR(STRING_ELT(sPayload, 0));
+    pll = strlen(pl);
+
+    if ((cmd & (~ 0xf)) != CMD_ctrl)
+	Rf_error("invalid command - must be a control command");
+    
+    hdr.cmd = cmd;
+    hdr.len = pll + 5; /* payload + header + NUL */
+    hdr.dof = 0;
+    hdr.res = 0;
+    rsc_write(c, &hdr, sizeof(hdr));
+    par = SET_PAR(DT_STRING, pll + 1);
+    rsc_write(c, &par, sizeof(par));
+    rsc_write(c, pl, pll + 1);
+    rsc_flush(c);
+    tl = get_hdr(sc, c, &hdr);
+    if (tl) {
+	/* FIXME: we actually discard it so we could use slurp instead ..? */
+	SEXP res = allocVector(RAWSXP, tl);
+	if (rsc_read(c, RAW(res), tl) != tl) {
+	    RS_close(sc);
+	    Rf_error("read error reading payload of the result");
+	}
+    }
+    if (CMD_FULL(hdr.cmd) == RESP_ERR)
+	Rf_error("Rserve responded with an error code 0x%x: %s", CMD_STAT(hdr.cmd), rs_status_string(CMD_STAT(hdr.cmd)));
+    else if (CMD_FULL(hdr.cmd) != RESP_OK)
+	Rf_error("unknown response 0x%x", hdr.cmd);
+	
+    return ScalarLogical(TRUE);
 }
 
 SEXP RS_switch(SEXP sc, SEXP prot) {
@@ -1014,6 +1100,24 @@ SEXP RS_oob_cb(SEXP sc, SEXP send_cb, SEXP msg_cb, SEXP query) {
     SET_VECTOR_ELT(res, 1, msg_cb);
     UNPROTECT(1);
     return res;    
+}
+
+SEXP RS_eq(SEXP s1, SEXP s2) {
+    if (!inherits(s1, "RserveConnection") || !inherits(s2, "RserveConnection")) return ScalarLogical(FALSE);
+    return ScalarLogical((EXTPTR_PTR(s1) == EXTPTR_PTR(s2)) ? TRUE : FALSE);
+}
+
+SEXP RS_print(SEXP sc) {
+    rsconn_t *c;
+    if (!inherits(sc, "RserveConnection")) Rf_error("invalid connection");
+    c = (rsconn_t*) EXTPTR_PTR(sc);
+    if (!c)
+	Rprintf(" <NULL> **invalid** RserveConnection\n");
+    else if (c->s == -1)
+	Rprintf(" Closed Rserve connection %p\n", c);
+    else
+	Rprintf(" Rserve %s connection %p (socket %d, queue length %d)\n", c->tls ? "TLS/QAP1" : "QAP1", c, c->s, c->in_cmd);
+    return sc;
 }
 
 /* --- asynchronous API --- */

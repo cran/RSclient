@@ -13,18 +13,22 @@
 %\alias{RSdetach}
 %\alias{RSevalDetach}
 %\alias{RSattach}
-%\alias{RSshutdown}
-%\alias{RSserverEval}
-%\alias{RSserverSource}
+\alias{RS.server.shutdown}
+\alias{RS.server.eval}
+\alias{RS.server.source}
 \usage{
-RS.connect(host = NULL, port = 6311L, tls = FALSE)
+RS.connect(host = NULL, port = 6311L, tls = FALSE, proxy.target = NULL,
+           proxy.wait = TRUE)
 RS.login(rsc, user, password, pubkey, authkey)
 RS.eval(rsc, x, wait = TRUE)
-RS.collect(rsc, timeout = Inf)
+RS.collect(rsc, timeout = Inf, detail = FALSE)
 RS.close(rsc)
-RS.assign(rsc, name, value)
+RS.assign(rsc, name, value, wait = TRUE)
 RS.switch(rsc, protocol = "TLS")
 RS.authkey(rsc, type = "rsa-authkey")
+RS.server.eval(rsc, text)
+RS.server.source(rsc, filename)
+RS.server.shutdown(rsc)
 RS.oobCallbacks(rsc, send, msg)
 }
 \description{
@@ -38,13 +42,21 @@ RS.oobCallbacks(rsc, send, msg)
   connections and one documented in \code{\link{RCC}} which uses C code
   and is far more versatile and efficient. This is the documentation for
   the latter which is new and supports features that are not supported
-  by R such as unix sockets, SSL/TLS connections, protocol switching and
-  secure authentication.
+  by R such as unix sockets, SSL/TLS connections, protocol switching,
+  secure authentication and multi-server collection.
 }
 \arguments{
   \item{host}{host to connect to or socket path or \code{NULL} for local host}
   \item{port}{TCP port to connect to or 0 if unix socket is to be used}
   \item{tls}{if \code{TRUE} then SSL/TLS encrypted connection is started}
+  \item{proxy.target}{proxy target (string) in the form \code{<host>:<port>}
+    to be used when connecting to a non-transparent proxy that requires
+    target designation. Not used when connected to transparent proxies
+    or directly to Rserve instances. Note that literal IPv6 addresses must be
+    quoted in \code{[]}.}
+  \item{proxy.wait}{if \code{TRUE} then the proxy will wait (indefinitely) if the
+    target is unavailable due to too high load, if \code{FALSE} then
+    the proxy is instructed to close the connection in such instance instead}
   \item{rsc}{Rserve connection as obtained from \code{RS.connect}}
   \item{user}{username for authentication (mandatory)}
   \item{password}{password for authentication}
@@ -55,12 +67,23 @@ RS.oobCallbacks(rsc, send, msg)
     if \code{FALSE} then \code{NULL} is returned instead and the result
     can be collected later with \code{RS.collect}}
   \item{timeout}{timeout (in seconds) to wait before giving up}
+  \item{detail}{if \code{TRUE} then the result payload is returned in a
+    list with elements \code{value} (unserialized result value of the
+    command - where applciable) and \code{rsc} (connection which
+    returned this result) which allows to identify the source of the
+    result and to distinguish timeout from a \code{NULL}
+    value. Otherwise the returned value is just the payload value of the
+    result.}
   \item{name}{string, name of the symbol to assign to}
-  \item{value}{value to assign}
+  \item{value}{value to assign -- if missing \code{name} is assumed to
+    be a symbol and its evaluated value will be used as value while the
+    symbol name will be used as name}
   \item{protocol}{protocol to switch to (string)}
   \item{type}{type of the authentication to perform (string)}
   \item{send}{callback function for \code{OOB_SEND}}
   \item{msg}{callback function for \code{OOB_MSG}}
+  \item{text}{string that will be parsed and evaluated on the server side}
+  \item{filename}{name of the file (on the server!) to source}
 }
 \details{
   \code{RS.connect} creates a connection to a Rserve. The returned handle
@@ -74,7 +97,7 @@ RS.oobCallbacks(rsc, send, msg)
   \code{user} entry is mandatory and at least one of \code{password},
   \code{pubkey} and \code{authkey} must be provided. Typical secure
   authentication is performed with
-  \code{RS.login(rsc, "username", "password", authkey=RS.authkey())}
+  \code{RS.login(rsc, "username", "password", authkey=RS.authkey(rsc))}
   which ensures that the authentication request is encrypted and cannot
   be spoofed. When using TLS connections \code{RS.authkey} is not
   necessary as the connection is already encrypted.
@@ -82,13 +105,14 @@ RS.oobCallbacks(rsc, send, msg)
   \code{RS.eval} evaluates the supplied expression remotely.
 
   \code{RS.collect} collects results from \code{RS.eval(..., wait =
-    FALSE)} calls. Note that it this case \code{rsc} can be either one
+    FALSE)} calls. Note that in this case \code{rsc} can be either one
   connection or a list of connections.
 
   \code{RS.assign} assigns a value to the remote global workspace.
   
   \code{RS.switch} attempts to switch the protocol currently used for
-  communication with Rserve.
+  communication with Rserve. Currently the only supported protocol
+  switch is from plain QAP1 to TLS secured (encrypted) QAP1.
 
   \code{RS.oobCallbacks} sets or retrieves the callback functions
   associated with \code{OOB_SEND} and \code{OOB_MSG} out-of-band
@@ -103,6 +127,24 @@ RS.oobCallbacks(rsc, send, msg)
   waiting for the response to another command (typically
   \code{RS.eval}). OOB commands must be explicitly enabled in the
   server in order to be used (they are disabled by default).
+
+  \code{RS.server.eval}, \code{RS.server.source} and
+  \code{RS.server.shutdown} are `control commands' which are enqueued to
+  be processed by the server asynchronously. They return \code{TRUE} on
+  success which means the command was enqueued - it does not mean that
+  the server has processed the command. All control commands affect only
+  future connections, they do NOT affect any already established client
+  connection (including the curretn one). \code{RS.server.eval} parses
+  and evaluates the given code in the server instance,
+  \code{RS.server.source} sources the given file in the server (the path
+  is interpreted by the server, it is not the local path of the client!)
+  and \code{RS.server.shutdown} attempts a clean shutdown of the
+  server. Note that control commands are disabled by default and must be
+  enabled in Rserve either in the configuration file with \code{control
+  enable} or on the command line with \code{--RS-enable-control} (the
+  latter only works with Rserve 1.7 and higher). If Rserve is configured
+  with authentication enabled then only admin users can issues control
+  commands (see Rserve documentation for details).
 }
 \examples{
 \dontrun{
