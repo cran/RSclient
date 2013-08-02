@@ -401,6 +401,7 @@ static long rsc_read(rsconn_t *c, void *buf, long needed) {
     return (long) (ptr - (char*) buf);
 }
 
+/* Note: OC handshake also uses the slurp buffer as scratch */
 static char slurp_buffer[65536];
 
 static long rsc_slurp(rsconn_t *c, long needed) {
@@ -416,6 +417,7 @@ static long rsc_slurp(rsconn_t *c, long needed) {
 
 /* Rserve protocol */
 #include "RSprotocol.h"
+#include "qap.h"
 
 /* --- R API -- */
 
@@ -426,16 +428,12 @@ static void rsconn_fin(SEXP what) {
     if (c) rsc_close(c);
 }
 
-/* FIXME: hack for now -- most of this client works only on little-endian machines
-   but there is some feeble effort to fix that -- in the meantime it's just noop */
-#define itop(X) X
-
 SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS, SEXP sProxyTarget, SEXP sProxyWait) {
     int port = asInteger(sPort), use_tls = (asInteger(useTLS) == 1), px_get_slot = (asInteger(sProxyWait) == 0);
     const char *host;
     char idstr[32];
     rsconn_t *c;
-    SEXP res;
+    SEXP res, caps = R_NilValue;
 
     if (port < 0 || port > 65534)
 	Rf_error("Invalid port number");
@@ -495,20 +493,54 @@ SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS, SEXP sProxyTarget, SEXP sPr
 	    Rf_error("Handshake failed - ID string not received (after CMD_PROXY_TARGET)");
 	}
     }
-    if (memcmp(idstr, "Rsrv", 4) || memcmp(idstr + 8, "QAP1", 4)) {
-	rsc_close(c);
-	Rf_error("Handshake failed - unknown protocol");
-    }
+    /* OC mode */
+    if (((const int*)idstr)[0] == itop(CMD_OCinit)) {
+	int sb_len;
+	struct phdr *hdr = (struct phdr *) idstr;
+	hdr->len = itop(hdr->len);
+	if (hdr->res || hdr->dof || hdr->len > sizeof(slurp_buffer) || hdr->len < 16) {
+	    rsc_close(c);
+	    Rf_error("Handshake failed - invalid RsOC OCinit message");
+	}
+	sb_len = 32 - sizeof(struct phdr);
+	memcpy(slurp_buffer, idstr + sizeof(struct phdr), sb_len);
+	if (rsc_read(c, slurp_buffer + sb_len, hdr->len - sb_len) != hdr->len - sb_len) {
+	    rsc_close(c);
+	    Rf_error("Handshake failed - truncated RsOC OCinit message");
+	} else {
+	    unsigned int *ibuf = (unsigned int*) slurp_buffer;
+	    int par_type = PAR_TYPE(*ibuf);
+	    int is_large = (par_type & DT_LARGE) ? 1 : 0;
+	    if (is_large) par_type ^= DT_LARGE;
+	    if (par_type != DT_SEXP) {
+		rsc_close(c);
+		Rf_error("Handshake failed - invalid payload in OCinit message");
+	    }
+	    ibuf += is_large + 1;
+	    caps = QAP_decode(&ibuf);
+	    if (caps != R_NilValue)
+		PROTECT(caps);
+	}
+    } else {
+	if (memcmp(idstr, "Rsrv", 4) || memcmp(idstr + 8, "QAP1", 4)) {
+	    rsc_close(c);
+	    Rf_error("Handshake failed - unknown protocol");
+	}
 
-    /* supported range 0100 .. 0103 */
-    if (memcmp(idstr + 4, "0100", 4) < 0 || memcmp(idstr + 4, "0103", 4) > 0) {
-	rsc_close(c);
-	Rf_error("Handshake failed - server protocol version too high");
+	/* supported range 0100 .. 0103 */
+	if (memcmp(idstr + 4, "0100", 4) < 0 || memcmp(idstr + 4, "0103", 4) > 0) {
+	    rsc_close(c);
+	    Rf_error("Handshake failed - server protocol version too high");
+	}
     }
 
     res = PROTECT(R_MakeExternalPtr(c, R_NilValue, R_NilValue));
     setAttrib(res, R_ClassSymbol, mkString("RserveConnection"));
     R_RegisterCFinalizer(res, rsconn_fin);
+    if (caps != R_NilValue) {
+	setAttrib(res, install("capabilities"), caps);
+	UNPROTECT(1);
+    }	  
     UNPROTECT(1);
     return res;
 }
@@ -556,8 +588,6 @@ static const char *rs_status_string(int status) {
     }
     return "(unknown error code)";
 }
-
-#include "qap.h"
 
 #ifdef USE_THREADS
 
@@ -672,7 +702,6 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 	if (hdr->cmd & CMD_OOB) {
 	    SEXP res, ee = R_NilValue;
 	    unsigned int *ibuf;
-	    int upc = 0;
 	    PROTECT(res = allocVector(RAWSXP, tl));
 	    if (rsc_read(c, RAW(res), tl) != tl) {
 		c->in_cmd = 0;
@@ -682,7 +711,7 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 	    ibuf = (unsigned int*) RAW(res);
 	    /* FIXME: we assume that we get encoded SEXP - we should check ... */
 	    ibuf += 1;
-	    res = QAP_decode(&ibuf, &upc);
+	    res = QAP_decode(&ibuf);
 
 	    /* FIXME: Rserve has a bug(?) that sets CMD_RESP on OOB commands so we clear it for now ... */
 	    hdr->cmd &= ~CMD_RESP;
@@ -718,7 +747,7 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 		}
 		UNPROTECT(1);
 	    }
-	    UNPROTECT(upc + 1);
+	    UNPROTECT(1);
 	    continue;
 	}
 	break;
@@ -729,6 +758,67 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 	Rf_error("command failed with status code 0x%x: %s", CMD_STAT(hdr->cmd), rs_status_string(CMD_STAT(hdr->cmd)));
     }
     return tl;
+}
+
+SEXP RS_eval_qap(SEXP sc, SEXP what, SEXP sWait) {
+    SEXP res = R_NilValue;
+    rsconn_t *c;
+    int async = (asInteger(sWait) == 0);
+
+    if (!inherits(sc, "RserveConnection")) Rf_error("invalid connection");
+    c = (rsconn_t*) EXTPTR_PTR(sc);
+    if (!c) Rf_error("invalid NULL connection");
+    if (!async && c->in_cmd) Rf_error("uncollected result from previous command, remove first");
+
+    {
+	struct phdr rhdr;
+	long pl   = QAP_getStorageSize(what), tl;
+	SEXP outv = allocVector(RAWSXP, pl);
+	int isx   = pl > 0x7fffff;
+	unsigned int *oh = (unsigned int*) RAW(outv);
+	unsigned int *ot = QAP_storeSEXP(oh + (isx ? 2 : 1), what, pl);
+
+	pl = sizeof(int) * (long) (ot - oh);
+	rhdr.cmd = CMD_eval;
+	/* If the call is OCref then it's OCcall and not eval ... */
+	if (TYPEOF(what) == LANGSXP && inherits(CAR(what), "OCref")) rhdr.cmd = CMD_OCcall;
+	rhdr.len = pl;
+	rhdr.dof = 0;
+#ifdef __LP64__
+	rhdr.res = pl >> 32;
+#else
+	rhdr.res = 0;
+#endif
+	oh[0] = SET_PAR(DT_SEXP | (isx ? DT_LARGE : 0), pl - (isx ? 8 : 4));
+	if (isx) oh[1] = (pl - 8) >> 24;
+	rsc_write(c, &rhdr, sizeof(rhdr));
+	if (pl) rsc_write(c, RAW(outv), pl);
+	rsc_flush(c);
+
+	if (async) {
+	    c->in_cmd++;
+	    return R_NilValue;
+	}
+	tl = get_hdr(sc, c, &rhdr);
+	res = allocVector(RAWSXP, tl);
+	if (rsc_read(c, RAW(res), tl) != tl) {
+	    RS_close(sc);
+	    Rf_error("read error reading payload of the eval result");
+	} else {
+	    unsigned int *ibuf = (unsigned int*) RAW(res);
+	    int par_type = PAR_TYPE(*ibuf);
+	    int is_large = (par_type & DT_LARGE) ? 1 : 0;
+	    if (is_large) par_type ^= DT_LARGE;
+	    if (par_type != DT_SEXP)
+		Rf_error("invalid result type coming from eval");
+	    ibuf += is_large + 1;
+	    PROTECT(res);
+	    res = QAP_decode(&ibuf);
+	    UNPROTECT(1);
+	}
+    }
+    
+    return res;
 }
 
 SEXP RS_eval(SEXP sc, SEXP what, SEXP sWait) {

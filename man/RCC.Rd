@@ -4,6 +4,7 @@
 \alias{RS.connect}
 \alias{RS.close}
 \alias{RS.eval}
+\alias{RS.eval.qap}
 \alias{RS.login}
 \alias{RS.switch}
 \alias{RS.authkey}
@@ -20,7 +21,8 @@
 RS.connect(host = NULL, port = 6311L, tls = FALSE, proxy.target = NULL,
            proxy.wait = TRUE)
 RS.login(rsc, user, password, pubkey, authkey)
-RS.eval(rsc, x, wait = TRUE)
+RS.eval(rsc, x, wait = TRUE, lazy = TRUE)
+RS.eval.qap(rsc, x, wait = TRUE)
 RS.collect(rsc, timeout = Inf, detail = FALSE)
 RS.close(rsc)
 RS.assign(rsc, name, value, wait = TRUE)
@@ -66,10 +68,14 @@ RS.oobCallbacks(rsc, send, msg)
   \item{wait}{if \code{TRUE} then the result is delivered synchronously,
     if \code{FALSE} then \code{NULL} is returned instead and the result
     can be collected later with \code{RS.collect}}
-  \item{timeout}{timeout (in seconds) to wait before giving up}
+  \item{lazy}{if \code{TRUE} then the passed expression is not evaluated
+    locally but passed for remote evaluation (as if quoted, modulo
+    substitution). Otherwise it is evaluated locally first and the
+    result is passed for remote evaluation.}
+  \item{timeout}{numeric, timeout (in seconds) to wait before giving up}
   \item{detail}{if \code{TRUE} then the result payload is returned in a
     list with elements \code{value} (unserialized result value of the
-    command - where applciable) and \code{rsc} (connection which
+    command - where applicable) and \code{rsc} (connection which
     returned this result) which allows to identify the source of the
     result and to distinguish timeout from a \code{NULL}
     value. Otherwise the returned value is just the payload value of the
@@ -103,6 +109,10 @@ RS.oobCallbacks(rsc, send, msg)
   necessary as the connection is already encrypted.
 
   \code{RS.eval} evaluates the supplied expression remotely.
+
+  \code{RS.eval.qap} behaves like \code{RS.eval(..., lazy=FALSE)}, but
+  uses the Rserve QAP serialization of R objects instead of the native R
+  serialization.
 
   \code{RS.collect} collects results from \code{RS.eval(..., wait =
     FALSE)} calls. Note that in this case \code{rsc} can be either one
@@ -153,8 +163,58 @@ RS.oobCallbacks(rsc, send, msg)
   RS.eval(c, library(MASS))
   RS.eval(c, rlm(stack.loss ~ ., stackloss)$coeff)
   RS.eval(c, getwd())
+  x <- rnorm(1e5)
+  ## this sends the contents of x to the remote side and runs `sum` on
+  ## it without actually creating the binding x on the remote side
+  RS.eval(c, as.call(list(quote(sum), x)), lazy=FALSE)
   RS.close(c)
   }
 }
 \author{Simon Urbanek}
+\section{Parallel use}{
+  It is currently possible to use Rserve connections in parallel via
+  \code{mcparallel} or \code{mclapply} if certain conditions are
+  met. First, only clear connection (non-TLS) are eligible for parallel
+  use and there may be no OOB commands. Then it is legal to use
+  connections in forked process as long as both the request is sent and
+  the result is collected in the same process while no other process
+  uses the connection. However, connections can only be created in the
+  parent session (except if the connection is created and subsequently
+  closed in the child process).
+
+  One possible use is to initiate connections to a cluster and perform
+  operations in parallel. For example:
+
+  \preformatted{    library(RSclient)
+    library(parallel)
+    ## try to connect to 50 different nodes
+    ## cannot parallelize this - must be in the parent process
+    c <- lapply(paste("machine", 1:50, sep=''),
+                function(name) try(RS.connect(name), silent=TRUE))
+    ## keep only successful connections
+    c <- c[sapply(c, class) == "RserveConnection"]
+    ## login to all machines in parallel (using RSA secured login)
+    unlist(mclapply(c,
+           function(c) RS.login(c, "user", "password",, RS.authkey(c)),
+	   mc.cores=length(c)))
+    ## do parallel work ...
+    ## pre-load some "job" function to all nodes
+    unlist(mclapply(c, function(c) RS.assign(c, job), mc.cores=length(c)))
+    ## etc. etc. then call it in parallel on all nodes ...
+    mclapply(c, function(c) RS.eval(c, job()), mc.cores=length(c))
+    
+    ## close all
+    sapply(c, RS.close)
+  }
+}
+\note{
+  The RSclient package can be compiled with TLS/SSL support based on
+  OpenSSL. Therefore the following statements may be true if RSclient
+  binaries are shipped together with OpenSSL: This product includes
+  software developed by the OpenSSL Project for use in the OpenSSL
+  Toolkit (http://www.openssl.org/). This product includes cryptographic
+  software written by Eric Young (eay@cryptsoft.com). This product
+  includes software written by Tim Hudson (tjh@cryptsoft.com).
+  They are not true otherwise.
+}
 \keyword{interface}
