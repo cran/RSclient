@@ -18,15 +18,15 @@
 \alias{RS.server.eval}
 \alias{RS.server.source}
 \usage{
-RS.connect(host = NULL, port = 6311L, tls = FALSE, proxy.target = NULL,
-           proxy.wait = TRUE)
+RS.connect(host = NULL, port = 6311L, tls = FALSE, verify = TRUE,
+           proxy.target = NULL, proxy.wait = TRUE, chain, key, ca)
 RS.login(rsc, user, password, pubkey, authkey)
 RS.eval(rsc, x, wait = TRUE, lazy = TRUE)
 RS.eval.qap(rsc, x, wait = TRUE)
-RS.collect(rsc, timeout = Inf, detail = FALSE)
+RS.collect(rsc, timeout = Inf, detail = FALSE, qap = FALSE)
 RS.close(rsc)
 RS.assign(rsc, name, value, wait = TRUE)
-RS.switch(rsc, protocol = "TLS")
+RS.switch(rsc, protocol = "TLS", verify = TRUE, chain, key, ca)
 RS.authkey(rsc, type = "rsa-authkey")
 RS.server.eval(rsc, text)
 RS.server.source(rsc, filename)
@@ -50,7 +50,22 @@ RS.oobCallbacks(rsc, send, msg)
 \arguments{
   \item{host}{host to connect to or socket path or \code{NULL} for local host}
   \item{port}{TCP port to connect to or 0 if unix socket is to be used}
-  \item{tls}{if \code{TRUE} then SSL/TLS encrypted connection is started}
+  \item{tls}{if \code{TRUE} then SSL/TLS encrypted connection is
+    started}
+  \item{verify}{logical, if \code{FALSE} no verification of the server
+    certificate is done, otherwise the certificate is verified and the
+    function will fail with an error if it is not valid.}
+  \item{chain}{string, optional, path to a file in PEM format that contains
+    client certificate and its chain. The client certificate must be
+    first in the chain.}
+  \item{key}{string, optional, path to a file in PEM format containing
+    the private key for the client certificate. If a client certificate
+    is necessary for the connection, both \code{chain} and \code{key}
+    must be set.}
+  \item{ca}{string, optional, path to a file holding any additional
+    certificate authority (CA) certificates (including intermediate
+    certificates) in PEM format that are required for the verification
+    of the server certificate. Only relevant if \code{verify=TRUE}.}
   \item{proxy.target}{proxy target (string) in the form \code{<host>:<port>}
     to be used when connecting to a non-transparent proxy that requires
     target designation. Not used when connected to transparent proxies
@@ -90,6 +105,9 @@ RS.oobCallbacks(rsc, send, msg)
   \item{msg}{callback function for \code{OOB_MSG}}
   \item{text}{string that will be parsed and evaluated on the server side}
   \item{filename}{name of the file (on the server!) to source}
+  \item{qap}{logical, if \code{TRUE} then the result is assumed to be
+    in QAP encoding (native Rserve protocol), otherwise it is assumed to
+    be using R serialization.}
 }
 \details{
   \code{RS.connect} creates a connection to a Rserve. The returned handle
