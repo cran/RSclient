@@ -1,7 +1,7 @@
-6e79e03151edb064672f0f57ec52df60 *DESCRIPTION
+94c9f32ef1548ddc8fcfcd44fd165631 *DESCRIPTION
 09d68d6181bd117fc2e6e78962515b4d *LICENSE
 41a0597763a63eb2ded4635699c039c0 *NAMESPACE
-9f13a2a05bf2632fdecef096db539244 *NEWS
+b3eae8891aea95d22e5c506c3c60a92f *NEWS
 a09fc90b56d2d5c0fbe3a34a08ccbcde *R/cli.R
 850e51c443e01c2c378065d9c8239667 *R/conn.R
 075456727b2e642b3942d9c129c4123e *man/RC-methods.Rd
@@ -10,8 +10,8 @@ a09fc90b56d2d5c0fbe3a34a08ccbcde *R/cli.R
 e7644d64e08a2c9e5601faf1ff40f9e4 *src/Makevars
 84f3c3174459e942b9c12bf475435aec *src/Makevars.win
 3eb8be8db486565d2b0ab71ff14e7dc3 *src/RSprotocol.h
-2fcd351e793a2d859dfd566f047933e5 *src/cli.c
-1d50e6007c43a92a1087dd6397ddd116 *src/dummy.c
+6cf22cfc0d75baa18117cd8e139c8788 *src/cli.c
+8a0c6919c62fdadda4f8aa303fb63169 *src/dummy.c
 9b009866672122d1e174aaca4c04f732 *src/qap.h
 1344dc39577de5d0de651393e5d95ed1 *src/qap_decode.c
 ff4d7238f0a17ac5f1ae8f069dd58388 *src/qap_decode.h

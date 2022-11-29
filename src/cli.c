@@ -45,6 +45,12 @@ static int wsock_up = 0;
 #endif
 
 #ifdef USE_TLS
+
+/* OpenSSL 3.x requires this */
+#ifndef OPENSSL_SUPPRESS_DEPRECATED
+#define OPENSSL_SUPPRESS_DEPRECATED 1
+#endif
+
 #include <openssl/rsa.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
@@ -169,7 +175,7 @@ static int first_tls = 1;
 
 #include <openssl/err.h>
 
-static void init_tls() {
+static void init_tls(void) {
     if (first_tls) {
 	SSL_library_init();	
 	SSL_load_error_strings();
@@ -208,7 +214,7 @@ static int tls_upgrade(rsconn_t *c, int verify, const char *chain, const char *k
 
 /* we split alloc and connect so alloc can be done on the main thread
    and connect on a separate one */
-static rsconn_t *rsc_alloc() {
+static rsconn_t *rsc_alloc(void) {
     rsconn_t *c = (rsconn_t*) calloc(sizeof(rsconn_t), 1);
 #ifdef WIN32
     if (!wsock_up) {
@@ -475,6 +481,12 @@ static void rsconn_fin(SEXP what) {
     if (c) rsc_close(c);
 }
 
+static void setAttrib_(SEXP x, const char *sym, SEXP sVal) {
+    PROTECT(sVal);
+    Rf_setAttrib(x, Rf_install(sym), sVal);
+    UNPROTECT(1);
+}
+
 SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS, SEXP sProxyTarget, SEXP sProxyWait, SEXP sVerify,
 		SEXP sChainFile, SEXP sKeyFile, SEXP sCAFile) {
     int port = asInteger(sPort), use_tls = (asInteger(useTLS) == 1), px_get_slot = (asInteger(sProxyWait) == 0), n;
@@ -594,7 +606,7 @@ SEXP RS_connect(SEXP sHost, SEXP sPort, SEXP useTLS, SEXP sProxyTarget, SEXP sPr
     setAttrib(res, R_ClassSymbol, mkString("RserveConnection"));
     R_RegisterCFinalizer(res, rsconn_fin);
     if (caps != R_NilValue) {
-	setAttrib(res, install("capabilities"), caps);
+	setAttrib_(res, "capabilities", caps);
 	UNPROTECT(1);
     }	  
     UNPROTECT(1);
@@ -768,6 +780,8 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 	    /* FIXME: we assume that we get encoded SEXP - we should check ... */
 	    ibuf += 1;
 	    res = QAP_decode(&ibuf);
+	    UNPROTECT(1); /* original RAW res */
+	    PROTECT(res); /* result */
 
 	    /* FIXME: Rserve has a bug(?) that sets CMD_RESP on OOB commands so we clear it for now ... */
 	    hdr->cmd &= ~CMD_RESP;
@@ -779,12 +793,12 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 #ifdef RC_DEBUG
 	    Rprintf(" - OOB %x %s (%d) %d\n", hdr->cmd, IS_OOB_SEND(hdr->cmd) ? "send" : "other", OOB_USR_CODE(hdr->cmd), (int) tl);
 #endif
-	    if (ee != R_NilValue) {
+	    if (ee != R_NilValue) { /* OOB send or msg - we ignore anything else */
 		res = eval(ee, R_GlobalEnv);
 		if (IS_OOB_MSG(hdr->cmd)) {
 		    struct phdr rhdr;
 		    long pl = QAP_getStorageSize(res);
-		    SEXP outv = allocVector(RAWSXP, pl);
+		    SEXP outv = PROTECT(allocVector(RAWSXP, pl));
 		    int isx = pl > 0x7fffff;
 		    unsigned int *oh = (unsigned int*) RAW(outv);
 		    unsigned int *ot = QAP_storeSEXP(oh + (isx ? 2 : 1), res, pl);
@@ -802,10 +816,11 @@ static long get_hdr(SEXP sc, rsconn_t *c, struct phdr *hdr) {
 		    rsc_write(c, &rhdr, sizeof(rhdr));
 		    if (pl) rsc_write(c, RAW(outv), pl);
 		    rsc_flush(c);
+		    UNPROTECT(1); /* outv */
 		}
-		UNPROTECT(1);
+		UNPROTECT(1); /* ee */
 	    }
-	    UNPROTECT(1);
+	    UNPROTECT(1); /* res */
 	    continue;
 	}
 	break;
@@ -831,7 +846,7 @@ SEXP RS_eval_qap(SEXP sc, SEXP what, SEXP sWait) {
     {
 	struct phdr rhdr;
 	long pl   = QAP_getStorageSize(what), tl;
-	SEXP outv = allocVector(RAWSXP, pl);
+	SEXP outv = PROTECT(allocVector(RAWSXP, pl));
 	int isx   = pl > 0x7fffff;
 	unsigned int *oh = (unsigned int*) RAW(outv);
 	unsigned int *ot = QAP_storeSEXP(oh + (isx ? 2 : 1), what, pl);
@@ -852,13 +867,15 @@ SEXP RS_eval_qap(SEXP sc, SEXP what, SEXP sWait) {
 	rsc_write(c, &rhdr, sizeof(rhdr));
 	if (pl) rsc_write(c, RAW(outv), pl);
 	rsc_flush(c);
+	UNPROTECT(1); /* outv */
+	outv = 0;
 
 	if (async) {
 	    c->in_cmd++;
 	    return R_NilValue;
 	}
 	tl = get_hdr(sc, c, &rhdr);
-	res = allocVector(RAWSXP, tl);
+	res = PROTECT(allocVector(RAWSXP, tl));
 	if (rsc_read(c, RAW(res), tl) != tl) {
 	    RS_close(sc);
 	    Rf_error("read error reading payload of the eval result");
@@ -870,12 +887,11 @@ SEXP RS_eval_qap(SEXP sc, SEXP what, SEXP sWait) {
 	    if (par_type != DT_SEXP)
 		Rf_error("invalid result type coming from eval");
 	    ibuf += is_large + 1;
-	    PROTECT(res);
 	    res = QAP_decode(&ibuf);
-	    UNPROTECT(1);
 	}
+	UNPROTECT(1);
     }
-    
+
     return res;
 }
 
@@ -903,11 +919,12 @@ SEXP RS_eval(SEXP sc, SEXP what, SEXP sWait) {
 	return R_NilValue;
     }
     tl = get_hdr(sc, c, &hdr);
-    res = allocVector(RAWSXP, tl);
+    res = PROTECT(allocVector(RAWSXP, tl));
     if (rsc_read(c, RAW(res), tl) != tl) {
 	RS_close(sc);
 	Rf_error("read error reading payload of the eval result");
     }
+    UNPROTECT(1);
     return res;
 }
 
@@ -967,8 +984,8 @@ SEXP RS_collect(SEXP sc, SEXP s_timeout) {
 	/* both sc and c are set to the node and the structure */
 	tl = get_hdr(sc, c, &hdr);
 	res = PROTECT(allocVector(RAWSXP, tl));
-	setAttrib(res, install("rsc"), sc);
-	if (rdy >= 0) setAttrib(res, install("index"), ScalarInteger(rdy + 1));
+	setAttrib_(res, "rsc", sc);
+	if (rdy >= 0) setAttrib_(res, "index", ScalarInteger(rdy + 1));
 	if (rsc_read(c, RAW(res), tl) != tl) {
 	    RS_close(sc);
 	    Rf_error("read error reading payload of the eval result");
@@ -1014,11 +1031,12 @@ SEXP RS_assign(SEXP sc, SEXP what, SEXP sWait) {
 	return R_NilValue;
     }
     tl = get_hdr(sc, c, &hdr);
-    res = allocVector(RAWSXP, tl);
+    res = PROTECT(allocVector(RAWSXP, tl));
     if (rsc_read(c, RAW(res), tl) != tl) {
 	RS_close(sc);
 	Rf_error("read error reading payload of the eval result");
     }
+    UNPROTECT(1);
     return res;
 }
 
@@ -1135,11 +1153,12 @@ SEXP RS_authkey(SEXP sc, SEXP type) {
     rsc_write(c, key_type, strlen(key_type) + 1);
     rsc_flush(c);
     tl = get_hdr(sc, c, &hdr);
-    res = allocVector(RAWSXP, tl);
+    res = PROTECT(allocVector(RAWSXP, tl));
     if (rsc_read(c, RAW(res), tl) != tl ) {
 	RS_close(sc);
 	Rf_error("read error loading key payload");
     }
+    UNPROTECT(1);
     return res;
 }
 
