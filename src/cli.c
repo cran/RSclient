@@ -58,6 +58,7 @@ static int wsock_up = 0;
 
 #define USE_RINTERNALS
 #include <Rinternals.h>
+#include "rcompat.h"
 
 /* asynchronous connection status */
 #define ACS_CONNECTING    1
@@ -183,6 +184,28 @@ static void init_tls(void) {
     }
 }
 
+#ifdef DEBUG_VERIFY
+static int verify_callback(int preverify, X509_STORE_CTX* x509_ctx)
+{
+    char buf[256];
+    int depth  = X509_STORE_CTX_get_error_depth(x509_ctx);
+    int err    = X509_STORE_CTX_get_error(x509_ctx);
+    X509* cert = X509_STORE_CTX_get_current_cert(x509_ctx);
+
+    *buf = 0;
+    Rprintf("Depth: %d, preverify: %d\n", depth, preverify);
+    X509_NAME_oneline(X509_get_subject_name(cert), buf, sizeof(buf));
+    Rprintf("  Subject: %s\n", buf);
+    X509_NAME_oneline(X509_get_issuer_name(cert), buf, sizeof(buf));
+    Rprintf("  Issuer: %s\n", buf);
+    if (!preverify)
+	Rprintf("**Verify error:num=%d:%s:depth=%d:%s\n", err, X509_verify_cert_error_string(err), depth, buf);
+    return 1;
+}
+#else
+#define verify_callback NULL
+#endif
+
 static int tls_upgrade(rsconn_t *c, int verify, const char *chain, const char *key, const char *ca) {
     SSL *ssl;
     SSL_CTX *ctx;
@@ -190,6 +213,11 @@ static int tls_upgrade(rsconn_t *c, int verify, const char *chain, const char *k
 	init_tls();
     ctx = SSL_CTX_new(SSLv23_client_method());
     SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L /* needs 1.1.0+ */
+    /* we add the default trust store if no ca was provided.
+       If ca was provided we assume the peer has to be verified using that ca */
+    if (!ca) SSL_CTX_set_default_verify_paths(ctx);
+#endif
     if (chain && SSL_CTX_use_certificate_chain_file(ctx, chain) != 1) {
 	Rf_warning("Cannot load certificate chain from file %s", chain);
 	return -1;
@@ -202,7 +230,7 @@ static int tls_upgrade(rsconn_t *c, int verify, const char *chain, const char *k
 	Rf_warning("Cannot load CA certificates from file %s", chain);
 	return -1;
     }
-    SSL_CTX_set_verify(ctx, (verify == 0) ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, 0);
+    SSL_CTX_set_verify(ctx, (verify == 0) ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, verify_callback);
     c->tls = ssl = SSL_new(ctx);
     c->send = tls_send;
     c->recv = tls_recv;
